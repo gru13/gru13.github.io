@@ -622,6 +622,13 @@ const saveCfg=()=>{try{
 }catch(e){}};
 S.tok=S.tok||{i:0,o:0,n:0};
 const canAsk=()=>CFG.provider==='claude'?!!SAMPLE:!!(CFG.key||CFG.proxy);
+function geminiContents(rest){
+  const out=[];
+  rest.forEach(m=>{const role=m.role==='assistant'?'model':'user';
+    if(out.length&&out[out.length-1].role===role)out[out.length-1].parts[0].text+='\n\n'+m.content;
+    else out.push({role,parts:[{text:m.content}]})});
+  return out;
+}
 async function askJSON(messages,signal){
   if(CFG.provider==='claude')return SAMPLE.json(messages,{cache:false,signal});
   const sys=messages[0].content,rest=messages.slice(1);
@@ -629,10 +636,10 @@ async function askJSON(messages,signal){
   if(CFG.proxy){url=CFG.proxy;init={body:JSON.stringify({provider:CFG.provider,model:CFG.model,messages}),headers:{'content-type':'application/json'}}}
   else if(CFG.provider==='gemini'){
     url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(CFG.model)}:generateContent`;
-    init={headers:{'x-goog-api-key':CFG.key,'content-type':'application/json'},body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:rest.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]})),generationConfig:{responseMimeType:'application/json',maxOutputTokens:1200}})};
+    init={headers:{'x-goog-api-key':CFG.key,'content-type':'application/json'},body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:geminiContents(rest),generationConfig:{responseMimeType:'application/json',maxOutputTokens:1200}})};
   }else{
     url='https://openrouter.ai/api/v1/chat/completions';
-    init={headers:{Authorization:'Bearer '+CFG.key,'content-type':'application/json','X-Title':'Fabric IQ Quest'},body:JSON.stringify({model:CFG.model,max_tokens:1200,response_format:{type:'json_object'},messages})};
+    init={headers:{Authorization:'Bearer '+CFG.key,'content-type':'application/json','X-Title':'Fabric IQ Quest'},body:JSON.stringify({model:CFG.model,max_tokens:1200,response_format:{type:'json_object'},messages:messages.map((m,i)=>i===0?{role:'system',content:m.content}:m)})};
   }
   let r;
   try{r=await fetch(url,Object.assign({method:'POST',signal},init))}
@@ -812,13 +819,13 @@ async function callTeacher(mode,shortText,body,query,label){
   const ch=retrieve(query,9000);
   const full=`${body}\n\n${learnerCtx()}\n\nCONTEXT (retrieved from the course YAML):\n${ctxText(ch)}`;
   x.turns.push({role:'user',content:`MODE ${mode}: ${shortText}`});
-  const hist=x.turns.slice(0,-1).slice(-6);
+  const hist=x.turns.slice(0,-1).slice(-10);   /* previous turns of this mission/review go to the model every call */
   while(hist.length&&hist[0].role!=='user')hist.shift();
   tutor.busy=true;tutor.ctl=new AbortController();drawChat();
   try{
     const r=await askJSON([{role:'user',content:RULES},...hist,{role:'user',content:full}],tutor.ctl.signal);
     if(!r||typeof r.say!=='string')throw{code:'invalid_json'};
-    x.turns.push({role:'assistant',content:JSON.stringify({say:r.say,task:r.task||null})});
+    x.turns.push({role:'assistant',content:JSON.stringify({say:r.say,task:r.task||null,verdict:r.verdict&&r.verdict.feedback?{result:r.verdict.result,feedback:String(r.verdict.feedback).slice(0,400)}:null})});
     const byId={};ch.forEach(d=>byId[d.i]=d);
     let used=(Array.isArray(r.used)?r.used:[]).filter(i=>byId[i]).map(i=>byId[i]);
     if(!used.length)used=ch.slice(0,3);
@@ -863,15 +870,15 @@ async function doSubmit(){
   const ta=$('#tans'),v=((ta&&ta.value)||'').trim();if(!v||tutor.busy)return;
   const x=cs(),st=x.stage,mi=isRev()?null:mIdx();x.log.push({k:'me',t:v});
   if(st==='recall'){
-    const r=await callTeacher('RECALL_GRADE','recall answer: '+v.slice(0,200),`MODE: RECALL_GRADE\n${missionRef(x.rm)}\nQuestion asked: ${x.lastTask}\nLearner answer:\n${v}`,MISSIONS[x.rm].t+' '+v,null);
+    const r=await callTeacher('RECALL_GRADE','recall answer: '+v.slice(0,400),`MODE: RECALL_GRADE\n${missionRef(x.rm)}\nQuestion asked: ${x.lastTask}\nLearner answer:\n${v}`,MISSIONS[x.rm].t+' '+v,null);
     if(r&&r.verdict&&r.verdict.feedback){vlog(r.verdict,MISSIONS[x.rm].ref);gainOn(x.rm,{correct:.3,partial:.15,wrong:-1,shown:.05}[r.verdict.result]||0);if(r.verdict.result==='correct')S.xp+=10;rec(x.rm,'recall',r.verdict.result,v);save();x.stage='recall_done'}
   }else if(st==='try'){
-    const r=await callTeacher('GRADE','answer: '+v.slice(0,300),missionBody('GRADE','Learner answer:\n'+v),missionQuery(v),null);
+    const r=await callTeacher('GRADE','answer: '+v.slice(0,600),missionBody('GRADE','Learner answer:\n'+v),missionQuery(v),null);
     if(r&&r.verdict&&r.verdict.feedback){const res=r.verdict.result;vlog(r.verdict,MISSIONS[mi].ref);gainOn(mi,{correct:.35,partial:.15,wrong:-1,shown:.1}[res]||0);rec(mi,'try',res,v);
       if(res==='correct'){S.xp+=25;S.streak++;x.stage='transfer_ready'}else if(res==='wrong')S.streak=0;
       S.best=Math.max(S.best||0,S.streak);save()}
   }else if(st==='transfer'){
-    const r=await callTeacher('TRANSFER_GRADE','variation answer: '+v.slice(0,300),`MODE: TRANSFER_GRADE\nMISSION ${mi+1}: ${MISSIONS[mi].t}\nVariation given: ${x.lastTask}\nPRIVATE EXPECTED ANSWER: ${x.expected||'(none: work it out from CONTEXT)'}\nLearner answer:\n${v}`,missionQuery(v),null);
+    const r=await callTeacher('TRANSFER_GRADE','variation answer: '+v.slice(0,600),`MODE: TRANSFER_GRADE\nMISSION ${mi+1}: ${MISSIONS[mi].t}\nVariation given: ${x.lastTask}\nPRIVATE EXPECTED ANSWER: ${x.expected||'(none: work it out from CONTEXT)'}\nLearner answer:\n${v}`,missionQuery(v),null);
     if(r&&r.verdict&&r.verdict.feedback){const res=r.verdict.result;vlog(r.verdict,x.expected);gainOn(mi,{correct:.3,partial:.15,wrong:-1,shown:.05}[res]||0);rec(mi,'transfer',res,v);
       if(res==='correct'||res==='partial'){if(res==='correct')S.xp+=15;finishMission(mi);x.stage='finished'}else S.streak=0;
       save()}
