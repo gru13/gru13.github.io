@@ -604,7 +604,7 @@ let SAMPLE=null;
 /* ---- Provider adapter: 'claude' (artifact sample) | 'gemini' | 'openrouter' (both via your proxy, see worker.js) ---- */
 const DEF_OR_MODEL='deepseek/deepseek-v4.1-flash-1017',DEF_GEM_MODEL='gemini-2.5-flash-lite';
 /* Default teacher: DeepSeek V4.1 Flash (1017) on OpenRouter. OpenRouter list price when set: $0.15 in / $0.60 out per 1M tokens, JSON mode supported. Prices change, edit them in the settings panel. */
-let CFG={provider:(window.claude?'claude':'openrouter'),model:DEF_OR_MODEL,key:'',remember:false,proxy:'',pin:0.15,pout:0.60};
+let CFG={provider:(window.claude?'claude':'openrouter'),model:DEF_OR_MODEL,key:'',remember:false,proxy:'',pin:0.15,pout:0.60,tokLimit:100000};
 /* Settings live in localStorage WITHOUT the key. The key lives in sessionStorage (cleared when the tab closes)
    unless "Remember on this device" is ticked, then in localStorage under its own name. */
 try{
@@ -626,6 +626,11 @@ const saveCfg=()=>{try{
 }catch(e){}};
 S.tok=S.tok||{i:0,o:0,n:0};
 const canAsk=()=>CFG.provider==='claude'?!!SAMPLE:!!(CFG.key||CFG.proxy);
+/* Token budget per session: counted in sessionStorage, so it resets when the tab is closed. Does not apply to the built-in Claude provider. */
+const SESSTOK='fiq-sess-tok';
+const sessUsed=()=>{try{const o=JSON.parse(sessionStorage.getItem(SESSTOK)||'{}');return (o.i||0)+(o.o||0)}catch(e){return 0}};
+const sessAdd=(i,o)=>{try{const x=JSON.parse(sessionStorage.getItem(SESSTOK)||'{}');x.i=(x.i||0)+i;x.o=(x.o||0)+o;sessionStorage.setItem(SESSTOK,JSON.stringify(x))}catch(e){}};
+const estTok=m=>Math.ceil(JSON.stringify(m).length/3.5);
 function geminiContents(rest){
   const out=[];
   rest.forEach(m=>{const role=m.role==='assistant'?'model':'user';
@@ -635,6 +640,8 @@ function geminiContents(rest){
 }
 async function askJSON(messages,signal){
   if(CFG.provider==='claude')return SAMPLE.json(messages,{cache:false,signal});
+  const lim=+CFG.tokLimit||0;
+  if(lim>0&&(sessUsed()>=lim||sessUsed()+estTok(messages)+2000>lim))throw{code:'token_limit'};
   const sys=messages[0].content,rest=messages.slice(1);
   let url,init,retry=null;
   if(CFG.proxy){url=CFG.proxy;init={body:JSON.stringify({provider:CFG.provider,model:CFG.model,messages}),headers:{'content-type':'application/json'}}}
@@ -659,6 +666,8 @@ async function askJSON(messages,signal){
   if(CFG.proxy){text=j.text;u=j.usage||{}}
   else if(CFG.provider==='gemini'){text=j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts?j.candidates[0].content.parts.map(p=>p.text||'').join(''):'';u={in:(j.usageMetadata||{}).promptTokenCount,out:(j.usageMetadata||{}).candidatesTokenCount}}
   else{text=j.choices&&j.choices[0]&&j.choices[0].message?j.choices[0].message.content:'';u={in:(j.usage||{}).prompt_tokens,out:(j.usage||{}).completion_tokens}}
+  const ti=u.in||estTok(messages),to=u.out||Math.ceil(String(text||'').length/3.5);
+  sessAdd(ti,to);
   S.tok.i+=u.in||0;S.tok.o+=u.out||0;S.tok.n++;save();
   const t=String(text||'').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,'');
   try{return JSON.parse(t)}catch(e){throw{code:'invalid_json'}}
@@ -739,7 +748,7 @@ function md(t){
   });
   return out;
 }
-const TERR={not_granted:'The teacher needs your permission to use Claude. Reload the page and allow it.',rate_limited:'Too many requests or usage limit reached. Wait a little, then try again.',session_expired:'Sign in again, then reload.',refused:'Claude did not answer that. Try different words.',invalid_json:'The reply was not readable. Press the button again.',empty_completion:'Empty reply. Try again.',upstream_error:'Connection problem. Try again.',proxy_unreachable:'Cannot reach the model API. Check your internet. If this page is inside Claude, outside hosts are blocked: use the hosted copy.',bad_key:'The API key was refused. It may be wrong or expired. Paste a new key in the Teacher model panel.',no_credit:'The OpenRouter credit is used up. Add credit or pick a free model.'};
+const TERR={not_granted:'The teacher needs your permission to use Claude. Reload the page and allow it.',rate_limited:'Too many requests or usage limit reached. Wait a little, then try again.',session_expired:'Sign in again, then reload.',refused:'Claude did not answer that. Try different words.',invalid_json:'The reply was not readable. Press the button again.',empty_completion:'Empty reply. Try again.',upstream_error:'Connection problem. Try again.',proxy_unreachable:'Cannot reach the model API. Check your internet. If this page is inside Claude, outside hosts are blocked: use the hosted copy.',bad_key:'The API key was refused. It may be wrong or expired. Paste a new key in the Teacher model panel.',no_credit:'The OpenRouter credit is used up. Add credit or pick a free model.',token_limit:'Session token limit reached. Close this tab and open a new one to start a fresh session, or raise the limit in the Teacher model panel.'};
 const VC={correct:['ok','Correct'],partial:['warn','Almost'],wrong:['bad','Not yet'],shown:['warn','Solution shown']};
 function srcHtml(u){
   if(!u||!u.length)return '';
@@ -782,13 +791,13 @@ function drawChat(){
 }
 function cfgPanel(){
   const P=CFG.provider,sp=spend();
-  return `<details class="srcs" style="margin:0 0 12px"><summary>Teacher model: ${P==='claude'?'Claude (this page)':esc(P)+' · '+esc(CFG.model)}${S.tok.n?` · ${S.tok.i+S.tok.o} tokens · about $${sp.toFixed(4)}`:''}</summary>
+  return `<details class="srcs" style="margin:0 0 12px"><summary>Teacher model: ${P==='claude'?'Claude (this page)':esc(P)+' · '+esc(CFG.model)}${S.tok.n?` · ${S.tok.i+S.tok.o} tokens · about $${sp.toFixed(4)}`:''}${P!=='claude'&&+CFG.tokLimit>0?` · session ${sessUsed().toLocaleString()} / ${(+CFG.tokLimit).toLocaleString()}`:''}</summary>
   <div class="tbar" style="flex-wrap:wrap"><label class="sub">Provider <select id="cprov" class="search" style="max-width:200px"><option value="claude" ${P==='claude'?'selected':''}>Claude (inside Claude)</option><option value="openrouter" ${P==='openrouter'?'selected':''}>OpenRouter (default)</option><option value="gemini" ${P==='gemini'?'selected':''}>Gemini</option></select></label>
   <label class="sub">Model <input id="cmodel" class="search" style="max-width:240px" value="${esc(CFG.model)}" placeholder="deepseek/deepseek-v4.1-flash-1017 (OpenRouter) or gemini-2.5-flash-lite (Gemini)"></label></div>
   <div class="tbar"><label class="sub" style="flex:1">API key <input id="ckey" type="password" autocomplete="off" class="search" style="max-width:none;width:100%" value="${esc(CFG.key)}" placeholder="Paste your key. Kept in this tab only unless you tick remember."></label></div>
   <div class="tbar"><label class="sub"><input type="checkbox" id="cremember" ${CFG.remember?'checked':''}> Remember the key on this device (otherwise it is cleared when you close this tab)</label></div>
   <div class="tbar"><label class="sub" style="flex:1">Proxy URL (optional, instead of a key) <input id="cproxy" class="search" style="max-width:none;width:100%" value="${esc(CFG.proxy)}" placeholder="leave empty to call the API directly"></label></div>
-  <div class="tbar" style="flex-wrap:wrap"><label class="sub">$ per 1M input <input id="cpin" class="search" style="max-width:100px" value="${CFG.pin}"></label><label class="sub">$ per 1M output <input id="cpout" class="search" style="max-width:100px" value="${CFG.pout}"></label><button type="button" class="btn" id="csave">Save</button></div>
+  <div class="tbar" style="flex-wrap:wrap"><label class="sub">$ per 1M input <input id="cpin" class="search" style="max-width:100px" value="${CFG.pin}"></label><label class="sub">$ per 1M output <input id="cpout" class="search" style="max-width:100px" value="${CFG.pout}"></label><label class="sub">Max tokens per session <input id="ctok" class="search" style="max-width:110px" inputmode="numeric" value="${CFG.tokLimit}" title="0 = no limit"></label><button type="button" class="btn" id="csave">Save</button></div>
   <p class="sub">The key never leaves this browser except in requests to Google or OpenRouter. By default it is kept for this tab only (sessionStorage). If you tick remember, it is kept in localStorage, which every page on this site can read, so only do that on your own device. Use a key with a spend limit and a short expiry. Clear the box and Save to remove it. Cost is an estimate from the token counts the proxy returns and the prices you enter.</p></details>`;
 }
 function notesHtml(){
@@ -928,7 +937,7 @@ document.addEventListener('click',e=>{
   if(t.id==='nc'){renderCodex();return}
   if(t.id==='hideintro'){intro=false;try{localStorage.setItem('fiq-intro','0')}catch(e){}renderBoard();return}
   if(t.id==='nt'){renderTutor();return}
-  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.remember=!!($('#cremember')&&$('#cremember').checked);CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;if(CFG.provider==='openrouter'&&!CFG.model.includes('/'))CFG.model=DEF_OR_MODEL;if(CFG.provider==='gemini'&&CFG.model.includes('/'))CFG.model=DEF_GEM_MODEL;saveCfg();renderTutor();return}
+  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.remember=!!($('#cremember')&&$('#cremember').checked);CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;CFG.tokLimit=Math.max(0,Math.floor(+$('#ctok').value||0));if(CFG.provider==='openrouter'&&!CFG.model.includes('/'))CFG.model=DEF_OR_MODEL;if(CFG.provider==='gemini'&&CFG.model.includes('/'))CFG.model=DEF_GEM_MODEL;saveCfg();renderTutor();return}
   if(t.dataset.mi){pickMission(t.dataset.mi);return}
   if(t.dataset.askterm){const tm=REF.T.find(z=>z.id==+t.dataset.askterm);if(!canAsk()||!tm)return;tutor.key='free';view='tutor';renderTutor();askFree('Explain "'+tm.term+'" to me with a small code example.');return}
   if(t.id==='tstart'){const x=cs();x.log=[];x.turns=[];x.stage='start';if(isRev()||pickRecall(mIdx())!==null)doRecall();else doTeach();return}
