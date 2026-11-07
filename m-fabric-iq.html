@@ -602,9 +602,24 @@ function renderJargon(){
 /* ===== GUIDED COURSE + VECTORLESS RAG (Claude is the brain; the page is the UI) ===== */
 let SAMPLE=null;
 /* ---- Provider adapter: 'claude' (artifact sample) | 'gemini' | 'openrouter' (both via your proxy, see worker.js) ---- */
-let CFG={provider:(window.claude?'claude':'gemini'),model:'gemini-2.5-flash-lite',key:'',proxy:'',pin:0.10,pout:0.40};
-try{const r=localStorage.getItem('fiq-cfg');if(r)CFG=Object.assign(CFG,JSON.parse(r))}catch(e){}
-const saveCfg=()=>{try{localStorage.setItem('fiq-cfg',JSON.stringify(CFG))}catch(e){}};
+let CFG={provider:(window.claude?'claude':'gemini'),model:'gemini-2.5-flash-lite',key:'',remember:false,proxy:'',pin:0.10,pout:0.40};
+/* Settings live in localStorage WITHOUT the key. The key lives in sessionStorage (cleared when the tab closes)
+   unless "Remember on this device" is ticked, then in localStorage under its own name. */
+try{
+  const r=localStorage.getItem('fiq-cfg');
+  if(r){const o=JSON.parse(r);
+    if(o.key){try{sessionStorage.setItem('fiq-key',o.key)}catch(e){}delete o.key}   /* migrate old saved key out of the settings blob */
+    CFG=Object.assign(CFG,o);localStorage.setItem('fiq-cfg',JSON.stringify(Object.assign({},CFG,{key:''})))}
+  const kl=localStorage.getItem('fiq-key');
+  CFG.remember=!!kl;
+  CFG.key=sessionStorage.getItem('fiq-key')||kl||'';
+}catch(e){}
+const saveCfg=()=>{try{
+  const o=Object.assign({},CFG);delete o.key;
+  localStorage.setItem('fiq-cfg',JSON.stringify(o));
+  localStorage.removeItem('fiq-key');sessionStorage.removeItem('fiq-key');
+  if(CFG.key)(CFG.remember?localStorage:sessionStorage).setItem('fiq-key',CFG.key);
+}catch(e){}};
 S.tok=S.tok||{i:0,o:0,n:0};
 const canAsk=()=>CFG.provider==='claude'?!!SAMPLE:!!(CFG.key||CFG.proxy);
 async function askJSON(messages,signal){
@@ -750,10 +765,11 @@ function cfgPanel(){
   return `<details class="srcs" style="margin:0 0 12px"><summary>Teacher model: ${P==='claude'?'Claude (this page)':esc(P)+' · '+esc(CFG.model)}${S.tok.n?` · ${S.tok.i+S.tok.o} tokens · about $${sp.toFixed(4)}`:''}</summary>
   <div class="tbar" style="flex-wrap:wrap"><label class="sub">Provider <select id="cprov" class="search" style="max-width:200px"><option value="claude" ${P==='claude'?'selected':''}>Claude (inside Claude)</option><option value="gemini" ${P==='gemini'?'selected':''}>Gemini (via proxy)</option><option value="openrouter" ${P==='openrouter'?'selected':''}>OpenRouter (via proxy)</option></select></label>
   <label class="sub">Model <input id="cmodel" class="search" style="max-width:240px" value="${esc(CFG.model)}" placeholder="gemini-2.5-flash-lite or openrouter/model-id"></label></div>
-  <div class="tbar"><label class="sub" style="flex:1">API key <input id="ckey" type="password" autocomplete="off" class="search" style="max-width:none;width:100%" value="${esc(CFG.key)}" placeholder="Paste your key. Saved in this browser only."></label></div>
+  <div class="tbar"><label class="sub" style="flex:1">API key <input id="ckey" type="password" autocomplete="off" class="search" style="max-width:none;width:100%" value="${esc(CFG.key)}" placeholder="Paste your key. Kept in this tab only unless you tick remember."></label></div>
+  <div class="tbar"><label class="sub"><input type="checkbox" id="cremember" ${CFG.remember?'checked':''}> Remember the key on this device (otherwise it is cleared when you close this tab)</label></div>
   <div class="tbar"><label class="sub" style="flex:1">Proxy URL (optional, instead of a key) <input id="cproxy" class="search" style="max-width:none;width:100%" value="${esc(CFG.proxy)}" placeholder="leave empty to call the API directly"></label></div>
   <div class="tbar" style="flex-wrap:wrap"><label class="sub">$ per 1M input <input id="cpin" class="search" style="max-width:100px" value="${CFG.pin}"></label><label class="sub">$ per 1M output <input id="cpout" class="search" style="max-width:100px" value="${CFG.pout}"></label><button type="button" class="btn" id="csave">Save</button></div>
-  <p class="sub">The key is stored in this browser (localStorage) and sent only to Google or OpenRouter. Use a key with a spend limit and a short expiry. Clear the box and Save to remove it. Cost is an estimate from the token counts the proxy returns and the prices you enter.</p></details>`;
+  <p class="sub">The key never leaves this browser except in requests to Google or OpenRouter. By default it is kept for this tab only (sessionStorage). If you tick remember, it is kept in localStorage, which every page on this site can read, so only do that on your own device. Use a key with a spend limit and a short expiry. Clear the box and Save to remove it. Cost is an estimate from the token counts the proxy returns and the prices you enter.</p></details>`;
 }
 function notesHtml(){
   const k=Object.keys(S.notes);if(!k.length)return '';
@@ -892,7 +908,7 @@ document.addEventListener('click',e=>{
   if(t.id==='nc'){renderCodex();return}
   if(t.id==='hideintro'){intro=false;try{localStorage.setItem('fiq-intro','0')}catch(e){}renderBoard();return}
   if(t.id==='nt'){renderTutor();return}
-  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;saveCfg();renderTutor();return}
+  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.remember=!!($('#cremember')&&$('#cremember').checked);CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;saveCfg();renderTutor();return}
   if(t.dataset.mi){pickMission(t.dataset.mi);return}
   if(t.dataset.askterm){const tm=REF.T.find(z=>z.id==+t.dataset.askterm);if(!canAsk()||!tm)return;tutor.key='free';view='tutor';renderTutor();askFree('Explain "'+tm.term+'" to me with a small code example.');return}
   if(t.id==='tstart'){const x=cs();x.log=[];x.turns=[];x.stage='start';if(isRev()||pickRecall(mIdx())!==null)doRecall();else doTeach();return}
