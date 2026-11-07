@@ -602,7 +602,9 @@ function renderJargon(){
 /* ===== GUIDED COURSE + VECTORLESS RAG (Claude is the brain; the page is the UI) ===== */
 let SAMPLE=null;
 /* ---- Provider adapter: 'claude' (artifact sample) | 'gemini' | 'openrouter' (both via your proxy, see worker.js) ---- */
-let CFG={provider:(window.claude?'claude':'gemini'),model:'gemini-2.5-flash-lite',key:'',remember:false,proxy:'',pin:0.10,pout:0.40};
+const DEF_OR_MODEL='deepseek/deepseek-v4.1-flash-1017',DEF_GEM_MODEL='gemini-2.5-flash-lite';
+/* Default teacher: DeepSeek V4.1 Flash (1017) on OpenRouter. OpenRouter list price when set: $0.15 in / $0.60 out per 1M tokens, JSON mode supported. Prices change, edit them in the settings panel. */
+let CFG={provider:(window.claude?'claude':'openrouter'),model:DEF_OR_MODEL,key:'',remember:false,proxy:'',pin:0.15,pout:0.60};
 /* Settings live in localStorage WITHOUT the key. The key lives in sessionStorage (cleared when the tab closes)
    unless "Remember on this device" is ticked, then in localStorage under its own name. */
 try{
@@ -613,6 +615,8 @@ try{
   const kl=localStorage.getItem('fiq-key');
   CFG.remember=!!kl;
   CFG.key=sessionStorage.getItem('fiq-key')||kl||'';
+  /* untouched old default (Gemini, no key, no proxy) moves to the new default; anything you set yourself is kept */
+  if(CFG.provider==='gemini'&&CFG.model===DEF_GEM_MODEL&&!CFG.key&&!CFG.proxy)Object.assign(CFG,{provider:window.claude?'claude':'openrouter',model:DEF_OR_MODEL,pin:0.15,pout:0.60});
 }catch(e){}
 const saveCfg=()=>{try{
   const o=Object.assign({},CFG);delete o.key;
@@ -632,17 +636,20 @@ function geminiContents(rest){
 async function askJSON(messages,signal){
   if(CFG.provider==='claude')return SAMPLE.json(messages,{cache:false,signal});
   const sys=messages[0].content,rest=messages.slice(1);
-  let url,init;
+  let url,init,retry=null;
   if(CFG.proxy){url=CFG.proxy;init={body:JSON.stringify({provider:CFG.provider,model:CFG.model,messages}),headers:{'content-type':'application/json'}}}
   else if(CFG.provider==='gemini'){
     url=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(CFG.model)}:generateContent`;
     init={headers:{'x-goog-api-key':CFG.key,'content-type':'application/json'},body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:geminiContents(rest),generationConfig:{responseMimeType:'application/json',maxOutputTokens:1200}})};
   }else{
     url='https://openrouter.ai/api/v1/chat/completions';
-    init={headers:{Authorization:'Bearer '+CFG.key,'content-type':'application/json','X-Title':'Fabric IQ Quest'},body:JSON.stringify({model:CFG.model,max_tokens:1200,response_format:{type:'json_object'},messages:messages.map((m,i)=>i===0?{role:'system',content:m.content}:m)})};
+    const orBody={model:CFG.model,max_tokens:2000,response_format:{type:'json_object'},reasoning:{enabled:false},messages:messages.map((m,i)=>i===0?{role:'system',content:m.content}:m)};
+    init={headers:{Authorization:'Bearer '+CFG.key,'content-type':'application/json','X-Title':'Fabric IQ Quest'},body:JSON.stringify(orBody)};
+    retry=()=>{delete orBody.reasoning;init.body=JSON.stringify(orBody)};   /* some models reject the reasoning switch: retry once without it */
   }
   let r;
-  try{r=await fetch(url,Object.assign({method:'POST',signal},init))}
+  try{r=await fetch(url,Object.assign({method:'POST',signal},init));
+    if(r.status===400&&retry){retry();r=await fetch(url,Object.assign({method:'POST',signal},init))}}
   catch(e){if(signal&&signal.aborted)throw{code:'cancelled'};throw{code:'proxy_unreachable'}}
   if(r.status===401||r.status===403||r.status===400&&CFG.provider==='gemini')throw{code:'bad_key'};
   if(r.status===402)throw{code:'no_credit'};
@@ -695,6 +702,11 @@ const MISSIONS=[
 S.course=S.course||0;S.cdone=S.cdone||{};
 let tutor={ss:{},key:null,busy:false,ctl:null};
 const cs=()=>tutor.ss[tutor.key]||(tutor.ss[tutor.key]={log:[],turns:[],stage:'start'});
+/* Chat history survives a reload in this tab (sessionStorage) and is gone when the tab closes. Source chunks are stored as ids only. */
+const CHATKEY='fiq-chat-v1';
+function saveChat(){try{const o={};Object.keys(tutor.ss).forEach(k=>{const x=tutor.ss[k];o[k]=Object.assign({},x,{log:x.log.map(e=>e.u?Object.assign({},e,{u:e.u.map(d=>d.i)}):e)})});sessionStorage.setItem(CHATKEY,JSON.stringify({ss:o,key:tutor.key}))}catch(e){}}
+function loadChat(){try{const r=JSON.parse(sessionStorage.getItem(CHATKEY)||'null');if(!r||!r.ss)return;const by={};DOCS.forEach(d=>by[d.i]=d);Object.keys(r.ss).forEach(k=>{const x=r.ss[k];x.log=(x.log||[]).map(e=>e.u?Object.assign({},e,{u:e.u.map(i=>by[i]).filter(Boolean)}):e);x.turns=x.turns||[];tutor.ss[k]=x});if(r.key)tutor.key=r.key}catch(e){}}
+loadChat();
 const isFree=()=>tutor.key==='free';
 const isRev=()=>tutor.key==='rev';
 const mIdx=()=>+tutor.key.slice(1);
@@ -765,13 +777,14 @@ function drawChat(){
   el.scrollTop=el.scrollHeight;
   const c=$('#tctl');if(c)c.innerHTML=ctlHtml();
   const stp=$('#tstop');if(stp)stp.hidden=!tutor.busy;
+  saveChat();
   const inp=$('#tin');if(inp)inp.onkeydown=e=>{if(e.key==='Enter'&&inp.value.trim()&&!tutor.busy){const v=inp.value;inp.value='';askFree(v)}};
 }
 function cfgPanel(){
   const P=CFG.provider,sp=spend();
   return `<details class="srcs" style="margin:0 0 12px"><summary>Teacher model: ${P==='claude'?'Claude (this page)':esc(P)+' · '+esc(CFG.model)}${S.tok.n?` · ${S.tok.i+S.tok.o} tokens · about $${sp.toFixed(4)}`:''}</summary>
-  <div class="tbar" style="flex-wrap:wrap"><label class="sub">Provider <select id="cprov" class="search" style="max-width:200px"><option value="claude" ${P==='claude'?'selected':''}>Claude (inside Claude)</option><option value="gemini" ${P==='gemini'?'selected':''}>Gemini (via proxy)</option><option value="openrouter" ${P==='openrouter'?'selected':''}>OpenRouter (via proxy)</option></select></label>
-  <label class="sub">Model <input id="cmodel" class="search" style="max-width:240px" value="${esc(CFG.model)}" placeholder="gemini-2.5-flash-lite or openrouter/model-id"></label></div>
+  <div class="tbar" style="flex-wrap:wrap"><label class="sub">Provider <select id="cprov" class="search" style="max-width:200px"><option value="claude" ${P==='claude'?'selected':''}>Claude (inside Claude)</option><option value="openrouter" ${P==='openrouter'?'selected':''}>OpenRouter (default)</option><option value="gemini" ${P==='gemini'?'selected':''}>Gemini</option></select></label>
+  <label class="sub">Model <input id="cmodel" class="search" style="max-width:240px" value="${esc(CFG.model)}" placeholder="deepseek/deepseek-v4.1-flash-1017 (OpenRouter) or gemini-2.5-flash-lite (Gemini)"></label></div>
   <div class="tbar"><label class="sub" style="flex:1">API key <input id="ckey" type="password" autocomplete="off" class="search" style="max-width:none;width:100%" value="${esc(CFG.key)}" placeholder="Paste your key. Kept in this tab only unless you tick remember."></label></div>
   <div class="tbar"><label class="sub"><input type="checkbox" id="cremember" ${CFG.remember?'checked':''}> Remember the key on this device (otherwise it is cleared when you close this tab)</label></div>
   <div class="tbar"><label class="sub" style="flex:1">Proxy URL (optional, instead of a key) <input id="cproxy" class="search" style="max-width:none;width:100%" value="${esc(CFG.proxy)}" placeholder="leave empty to call the API directly"></label></div>
@@ -785,7 +798,7 @@ function notesHtml(){
 function renderTutor(){
   view='tutor';sess=null;
   if(!canAsk()){
-    setApp(`<section class="panel"><div class="sect-h"><h2>Guided course</h2></div><p>The guided course needs a teacher model. Inside Claude it uses Claude. Anywhere else, choose Gemini or OpenRouter and paste your API key.</p>${cfgPanel()}<p class="sub">The quiz game, Jargon and Codex still work without it.</p></section>`);return;
+    setApp(`<section class="panel"><div class="sect-h"><h2>Guided course</h2></div><p>The guided course needs a teacher model. Inside Claude it uses Claude. Anywhere else, paste an OpenRouter API key (default model: DeepSeek V4.1 Flash) or choose Gemini.</p>${cfgPanel()}<p class="sub">The quiz game, Jargon and Codex still work without it.</p></section>`);return;
   }
   if(!tutor.key)tutor.key='m'+Math.min(S.course,MISSIONS.length-1);
   const cfgHtml=cfgPanel();
@@ -915,7 +928,7 @@ document.addEventListener('click',e=>{
   if(t.id==='nc'){renderCodex();return}
   if(t.id==='hideintro'){intro=false;try{localStorage.setItem('fiq-intro','0')}catch(e){}renderBoard();return}
   if(t.id==='nt'){renderTutor();return}
-  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.remember=!!($('#cremember')&&$('#cremember').checked);CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;saveCfg();renderTutor();return}
+  if(t.id==='csave'){CFG.provider=$('#cprov').value;CFG.model=$('#cmodel').value.trim()||CFG.model;CFG.key=$('#ckey').value.trim();CFG.remember=!!($('#cremember')&&$('#cremember').checked);CFG.proxy=$('#cproxy').value.trim();CFG.pin=+$('#cpin').value||0;CFG.pout=+$('#cpout').value||0;if(CFG.provider==='openrouter'&&!CFG.model.includes('/'))CFG.model=DEF_OR_MODEL;if(CFG.provider==='gemini'&&CFG.model.includes('/'))CFG.model=DEF_GEM_MODEL;saveCfg();renderTutor();return}
   if(t.dataset.mi){pickMission(t.dataset.mi);return}
   if(t.dataset.askterm){const tm=REF.T.find(z=>z.id==+t.dataset.askterm);if(!canAsk()||!tm)return;tutor.key='free';view='tutor';renderTutor();askFree('Explain "'+tm.term+'" to me with a small code example.');return}
   if(t.id==='tstart'){const x=cs();x.log=[];x.turns=[];x.stage='start';if(isRev()||pickRecall(mIdx())!==null)doRecall();else doTeach();return}
